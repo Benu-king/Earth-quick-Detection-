@@ -1,6 +1,4 @@
-Absolutely! Here's a **professional, emoji-enhanced, table-styled README** for your project:
 
----
 
 # 🌍 Earthquake Detection Simulation
 
@@ -113,7 +111,3 @@ project/
 This project is free to use and modify for **educational purposes**.
 
 ---
-
-If you want, I can make a **GitHub-ready version** with even **better formatting using badges, emojis, and code blocks** so it looks ultra-professional online.
-
-Do you want me to do that?
