@@ -1,0 +1,404 @@
+//benyas wondwosen follow on tiktok to get mor ideas
+
+
+import serial
+import time
+import pygame
+import math
+import random
+import os
+try:
+    from PIL import Image, ImageSequence
+except Exception:
+    Image = None
+    ImageSequence = None
+import sys
+
+arduino = None
+try:
+    arduino = serial.Serial('COM3', 9600, timeout=0.05)
+    time.sleep(1.0)
+    print('Serial opened on COM3')
+except Exception as e:
+    print(f'Warning: could not open serial COM3: {e}')
+    arduino = None
+pygame.init()
+try:
+    pygame.mixer.init()
+except Exception:
+    print('Warning: pygame mixer init failed')
+alert_sound = None
+try:
+    alert_sound = pygame.mixer.Sound("quq.mp3")
+except Exception:
+    print('Warning: could not load quq.mp3 (alert sound)')
+alert_channel = None
+
+vibration_active = False  
+alert_playing = False     
+
+
+def play_alert():
+    global alert_channel, alert_playing
+    if alert_sound and not alert_playing:
+        try:
+            alert_channel = alert_sound.play()
+            alert_playing = True
+        except Exception:
+            alert_channel = None
+            alert_playing = False
+
+
+def update_alert():
+    global alert_playing, alert_channel
+    if alert_playing and alert_channel is not None:
+        try:
+            if not alert_channel.get_busy():
+                alert_playing = False
+                alert_channel = None
+        except Exception:
+            alert_playing = False
+            alert_channel = None
+
+class PhysicalPerson:
+    def __init__(self, x, ground_y):
+        self.pos = pygame.Vector2(x, ground_y - 40)
+        self.ground_y = ground_y
+        self.speed = 80.0
+        self.dir = 1
+        self.phase = 0.0 
+
+        self.torso_len = 40
+        self.neck_len = 8
+        self.head_r = 10
+        self.upper_leg = 22
+        self.lower_leg = 24
+        self.upper_arm = 16
+        self.lower_arm = 18
+        self.prev_pelvis_y = self.pos.y
+        self.torso_angle = 0.0
+        self.raise_progress = 0.0
+    def update(self, dt, speed_multiplier=1.0):
+        walk_speed = self.speed * speed_multiplier
+        self.phase += dt * (walk_speed / 40.0) * 2.0 
+        bob = math.sin(self.phase * 2.0) * 6.0 * (0.5 + 0.5 * speed_multiplier)
+        target_y = self.ground_y - 40 - bob
+        self.pos.y += (target_y - self.pos.y) * min(1.0, dt * 8.0)
+        sway = math.sin(self.phase) * 0.12
+        self.torso_angle = sway * (0.8 + 0.6 * speed_multiplier)
+
+        try:
+            vib = globals().get('vibration_active', False)
+        except Exception:
+            vib = False
+        if vib:
+            self.raise_progress = min(1.0, self.raise_progress + dt * 3.0)
+        else:
+            self.raise_progress = max(0.0, self.raise_progress - dt * 3.0)
+
+    def _two_link_ik(self, hip, foot_target, l1, l2, elbow_dir=1):
+        dir_vec = foot_target - hip
+        d = dir_vec.length()
+        if d < 1e-5:
+            return hip + pygame.Vector2(0, l1)
+        d_clamped = max(min(d, l1 + l2 - 0.001), abs(l1 - l2) + 0.001)
+        a = math.acos((l1 * l1 + d_clamped * d_clamped - l2 * l2) / (2 * l1 * d_clamped))
+        base_ang = math.atan2(dir_vec.y, dir_vec.x)
+        knee_ang = base_ang + elbow_dir * a
+        knee = hip + pygame.Vector2(math.cos(knee_ang) * l1, math.sin(knee_ang) * l1)
+        return knee
+
+    def draw(self, surf):
+        pelvis = pygame.Vector2(self.pos.x, self.pos.y)
+        torso_top = pelvis + pygame.Vector2(0, -self.torso_len)
+        neck = torso_top + pygame.Vector2(0, -self.neck_len)
+        head_pos = neck + pygame.Vector2(0, -self.head_r - 2)
+
+        step_x = math.sin(self.phase) * 18
+        foot_l = pygame.Vector2(self.pos.x - 8 + step_x, self.ground_y)
+        foot_r = pygame.Vector2(self.pos.x + 8 - step_x, self.ground_y)
+
+        knee_l = self._two_link_ik(pelvis, foot_l, self.upper_leg, self.lower_leg)
+        knee_r = self._two_link_ik(pelvis, foot_r, self.upper_leg, self.lower_leg)
+
+        shoulder = torso_top
+        arm_swing = 0.0
+        swing_hand_l = shoulder + pygame.Vector2(-18 + arm_swing, 12)
+        swing_hand_r = shoulder + pygame.Vector2(18 - arm_swing, 12)
+        hand_l = swing_hand_l
+        hand_r = swing_hand_r
+
+        elbow_l = self._two_link_ik(shoulder, hand_l, self.upper_arm, self.lower_arm, elbow_dir=-1)
+        elbow_r = self._two_link_ik(shoulder, hand_r, self.upper_arm, self.lower_arm, elbow_dir=-1)
+        shadow_w = 48
+        shadow_h = 12
+        shadow_surf = pygame.Surface((shadow_w, shadow_h), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow_surf, (0, 0, 0, 80), (0, 0, shadow_w, shadow_h))
+        sx = int(self.pos.x - shadow_w / 2)
+        sy = int(self.ground_y - shadow_h / 2 + 6)
+        surf.blit(shadow_surf, (sx, sy))
+        def draw_limb(a, b, thickness, color):
+            dir_v = b - a
+            l = dir_v.length()
+            if l < 1e-5:
+                pygame.draw.circle(surf, color, (int(a.x), int(a.y)), int(thickness // 2))
+                return
+            perp = pygame.Vector2(-dir_v.y, dir_v.x)
+            try:
+                perp.scale_to_length(thickness / 2.0)
+            except Exception:
+                perp = perp.normalize() * (thickness / 2.0)
+            p1 = a + perp
+            p2 = a - perp
+            p3 = b - perp
+            p4 = b + perp
+            pygame.draw.polygon(surf, color, [(p1.x, p1.y), (p2.x, p2.y), (p3.x, p3.y), (p4.x, p4.y)])
+            pygame.draw.circle(surf, color, (int(a.x), int(a.y)), int(thickness // 2))
+            pygame.draw.circle(surf, color, (int(b.x), int(b.y)), int(thickness // 2))
+
+        skin = (200, 160, 120)
+        cloth = (60, 80, 120)
+        leg_thickness = 14
+        draw_limb(pelvis, knee_l, leg_thickness, cloth)
+        draw_limb(knee_l, foot_l, leg_thickness, cloth)
+        draw_limb(pelvis, knee_r, leg_thickness, cloth)
+        draw_limb(knee_r, foot_r, leg_thickness, cloth)
+        torso_w = 40
+        torso_h = int(self.torso_len * 1.1)
+        torso_surf = pygame.Surface((torso_w, torso_h), pygame.SRCALPHA)
+        pygame.draw.ellipse(torso_surf, cloth, (0, 0, torso_w, torso_h))
+        torso_rot = pygame.transform.rotate(torso_surf, -math.degrees(self.torso_angle))
+        tr = torso_rot.get_rect()
+        tr.center = (int(pelvis.x), int((pelvis.y + torso_top.y) / 2))
+        surf.blit(torso_rot, tr.topleft)
+
+        arm_thickness = 10
+        draw_limb(shoulder, elbow_l, arm_thickness, cloth)
+        draw_limb(elbow_l, hand_l, arm_thickness - 2, skin)
+        draw_limb(shoulder, elbow_r, arm_thickness, cloth)
+        draw_limb(elbow_r, hand_r, arm_thickness - 2, skin)
+
+        pygame.draw.circle(surf, skin, (int(head_pos.x), int(head_pos.y)), self.head_r)
+        pygame.draw.circle(surf, (220, 200, 180), (int(head_pos.x - 3), int(head_pos.y - 3)), 2) 
+
+        if self.raise_progress > 0.2:
+            font = pygame.font.SysFont("Arial", 50, bold=True)
+            
+            txt = 'Earthquake Detect'
+            text_s = font.render(txt, True, (255, 0, 0))
+            outline = font.render(txt, True, (0, 0, 0))
+            tx = int(head_pos.x + -100)
+            ty = int(head_pos.y - 72 - (self.raise_progress * 10))
+            surf.blit(outline, (tx - 1, ty - 1))
+            surf.blit(text_s, (tx, ty))
+
+
+class Particle:
+    def __init__(self, pos, vel, life, color=(180, 160, 140), size=4):
+        self.pos = pygame.Vector2(pos)
+        self.vel = pygame.Vector2(vel)
+        self.life = life
+        self.color = color
+        self.size = size
+
+    def update(self, dt):
+        self.vel.y += 800 * dt
+        self.pos += self.vel * dt
+        self.life -= dt
+
+    def draw(self, surf):
+        if self.life <= 0:
+            return
+        alpha = max(0, min(255, int(255 * (self.life / 2.0))))
+        s = pygame.Surface((self.size, self.size), pygame.SRCALPHA)
+        s.fill((*self.color, alpha))
+        surf.blit(s, (int(self.pos.x), int(self.pos.y)))
+
+
+class Emitter:
+    def __init__(self):
+        self.particles = []
+
+    def emit(self, pos, count=16, spread=50):
+        for _ in range(count):
+            angle = random.uniform(-math.pi, 0)
+            speed = random.uniform(80, 420)
+            vel = pygame.Vector2(math.cos(angle) * speed, math.sin(angle) * speed - 80)
+            life = random.uniform(0.6, 2.0)
+            size = random.randint(2, 6)
+            self.particles.append(Particle(pos, vel, life, size=size))
+
+    def update(self, dt):
+        for p in self.particles:
+            p.update(dt)
+        self.particles = [p for p in self.particles if p.life > 0 and p.pos.y < 2000]
+
+    def draw(self, surf):
+        for p in self.particles:
+            p.draw(surf)
+class SpriteSheet:
+    def __init__(self, image, cols=None, rows=1, frame_w=None, frame_h=None):
+        self.image = image
+        if image is None:
+            self.frames = []
+            return
+        iw, ih = image.get_size()
+        if cols is None and frame_w:
+            cols = iw // frame_w
+        if frame_h is None:
+            frame_h = ih // rows
+        cols = cols or 1
+        fw = frame_w or (iw // cols)
+        self.frames = []
+        for r in range(rows):
+            for c in range(cols):
+                rect = pygame.Rect(c * fw, r * frame_h, fw, frame_h)
+                self.frames.append(image.subsurface(rect))
+
+    def get_frame(self, idx):
+        if not self.frames:
+            return None
+        return self.frames[int(idx) % len(self.frames)]
+
+
+class SpritePerson:
+    def __init__(self, run_sheet: SpriteSheet, hands_img, pos):
+        self.run_sheet = run_sheet
+        self.hands_img = hands_img
+        self.pos = pygame.Vector2(pos)
+        self.frame = 0.0
+        self.frame_time = 0.08
+
+    def update(self, dt, speed_multiplier=1.0):
+        self.frame += dt / max(1e-6, self.frame_time) * speed_multiplier * 1.2
+
+    def draw(self, surf):
+        vib = globals().get('vibration_active', False)
+        if vib and self.hands_img:
+            img = self.hands_img
+        else:
+            img = None
+
+        if img is None and self.run_sheet and self.run_sheet.frames:
+            frame_img = self.run_sheet.get_frame(int(self.frame))
+            if frame_img:
+                r = frame_img.get_rect()
+                r.center = (int(self.pos.x), int(self.pos.y))
+                surf.blit(frame_img, r)
+                return
+
+        if img is not None:
+            r = img.get_rect()
+            r.center = (int(self.pos.x), int(self.pos.y))
+            surf.blit(img, r)
+            return
+        pygame.draw.circle(surf, (50, 50, 50), (int(self.pos.x), int(self.pos.y - 30)), 18)
+def main():
+    global vibration_active
+    WIN_W, WIN_H = 800, 480
+    screen = pygame.display.set_mode((WIN_W, WIN_H))
+    pygame.display.set_caption('earth quake detection - powerd by benyas')
+    clock = pygame.time.Clock()
+
+    ground_y = int(WIN_H * 0.78)
+    assets_dir = os.path.join(os.path.dirname(__file__), 'assets')
+    run_img = None
+    hands_img = None
+    walk_speed_val = 80.0
+    person = PhysicalPerson(WIN_W // 2, ground_y)
+    emitter = Emitter()
+    quake_progress = 0.0
+    prev_vib = False
+
+    ground_offset = 0.0
+    ground_speed = walk_speed_val * 0.6
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000.0
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    running = False
+                elif ev.key == pygame.K_s:
+                    if not vibration_active:
+                        vibration_active = True
+                        play_alert()
+                elif ev.key == pygame.K_g:
+                    if vibration_active:
+                        vibration_active = False
+        if arduino is not None:
+            try:
+                if arduino.in_waiting > 0:
+                    data = arduino.read().decode('utf-8', errors='ignore').strip()
+                    if data == 'S' and not vibration_active:
+                        vibration_active = True
+                        print('ወገኖቼ የመረት መንቀጥቀጥ😂🤷‍♂️')
+                        play_alert()
+                    elif data == 'G' and vibration_active:
+                        vibration_active = False
+                        print('Vibration STOP')
+            except Exception:
+                pass
+        ground_offset += ground_speed * dt
+        if vibration_active:
+            ground_offset += math.sin(time.time() * 40.0) * 8.0 * quake_progress
+        if vibration_active:
+            quake_progress = min(1.0, quake_progress + dt * 2.0)
+        else:
+            quake_progress = max(0.0, quake_progress - dt * 1.5)
+        if vibration_active and not prev_vib:
+            emitter.emit((WIN_W // 2, ground_y - 30), count=28)
+        prev_vib = vibration_active
+        emitter.update(dt)
+        if person is not None:
+            speed_mult = ground_speed / max(1e-6, getattr(person, 'speed', walk_speed_val))
+            person.update(dt, speed_mult)
+        screen.fill((135, 206, 235)) 
+        pygame.draw.rect(screen, (90, 66, 50), (0, ground_y, WIN_W, WIN_H - ground_y))
+        tile = 40
+        off = int(ground_offset) % tile
+        for i in range(-tile, WIN_W + tile, tile):
+            x = i - off
+            pygame.draw.line(screen, (100, 80, 60), (x, ground_y + 6), (x + 20, ground_y + 6), 1)
+        if person is not None:
+            person.draw(screen)
+        emitter.draw(screen)
+        if quake_progress > 0.02:
+            cx = int(WIN_W // 2)
+            cy = int(ground_y + 4)
+            max_len = 220
+            segs = 8
+            crack_color = (28, 20, 18)
+            for i in range(segs):
+                ang = (i / segs) * math.pi * 2 + random.uniform(-0.3, 0.3)
+                length = int(max_len * (0.2 + quake_progress * random.uniform(0.6, 1.0)))
+                points = []
+                px, py = cx, cy
+                for s in range(6):
+                    frac = (s + 1) / 6.0
+                    rx = px + math.cos(ang + random.uniform(-0.6, 0.6) * (1 - frac)) * (length * frac)
+                    ry = py + math.sin(ang + random.uniform(-0.6, 0.6) * (1 - frac)) * (length * frac)
+                    points.append((int(rx), int(ry)))
+                if points:
+                    pygame.draw.lines(screen, crack_color, False, [(cx, cy)] + points, max(1, int(2 * quake_progress)))
+        shake_mag = quake_progress * 14
+        if shake_mag > 0.5:
+            ox = int(random.uniform(-shake_mag, shake_mag))
+            oy = int(random.uniform(-shake_mag * 0.6, shake_mag * 0.6))
+            buffer = screen.copy()
+            screen.fill((0, 0, 0))
+            screen.blit(buffer, (ox, oy))
+        font = pygame.font.SysFont(None, 20)
+        st = 'VIBRATION: ON' if vibration_active else 'VIBRATION: off'
+        screen.blit(font.render(st, True, (255, 255, 255)), (10, 10))
+        pygame.display.flip()
+        if not vibration_active:
+            update_alert()
+
+    pygame.quit()
+
+
+if __name__ == '__main__':
+    main()
